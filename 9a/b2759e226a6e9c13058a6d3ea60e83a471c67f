@@ -1,0 +1,23 @@
+README.md
+  s_e566707a8b0e0b::t_523b594e77445b 53
+  s_e566707a8b0e0b::t_33980fab52ea48 10,49-52
+  s_e566707a8b0e0b::t_487922d7603c72 54
+checkout-entries-v2.2.6.patch
+  s_e566707a8b0e0b::t_74c15e0c6ef4e3 140-203,792,795-884,895,904,924-932,935,938,947-948,978
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9ab2759e226a6e9c13058a6d3ea60e83a471c67f",
+  "prompts": {},
+  "sessions": {
+    "s_e566707a8b0e0b": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e34e4b848ffeN57HqrPwG7ovAe",
+        "model": "unknown"
+      },
+      "human_author": "Nick Hibberd <nhibberd@gmail.com>"
+    }
+  }
+}
