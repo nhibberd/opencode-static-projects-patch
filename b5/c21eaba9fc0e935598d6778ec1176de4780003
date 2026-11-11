@@ -1,0 +1,18 @@
+LICENSE
+  h_7b94bf8a23aebe 1-21
+README.md
+  h_7b94bf8a23aebe 1-57
+checkout-entries-v2.2.6.patch
+  h_7b94bf8a23aebe 1-816
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b5c21eaba9fc0e935598d6778ec1176de4780003",
+  "prompts": {},
+  "humans": {
+    "h_7b94bf8a23aebe": {
+      "author": "Nick Hibberd <nhibberd@gmail.com>"
+    }
+  }
+}
