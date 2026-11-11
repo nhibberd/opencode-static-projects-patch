@@ -42,6 +42,16 @@ Open <http://127.0.0.1:4444>, connect to your existing OpenCode 2.2.6 server, an
 
 For a native Electron build, follow upstream's `packages/desktop/README.md`. This repository does not include a native installer. The patch does not alter or restart an installed application or service.
 
+### Green macOS app icon
+
+Before building the native app, overlay the green icon assets from this repository onto the upstream checkout:
+
+```sh
+cp -R /path/to/opencode-checkout-patch/macos-icons/. packages/desktop/icons/prod/
+```
+
+Build with `OPENCODE_CHANNEL=prod`. The assets cover the running Dock icon, the ICNS fallback, and the macOS 26 Icon Composer icon. They retain OpenCode's design with a green tint so the patched app is distinguishable from the official app. The bundle identity and existing preferences are unchanged.
+
 See `CHECKOUT_ENTRIES.md` inside the applied patch for behavior, limitations, and verification commands.
 
 ## Verification
