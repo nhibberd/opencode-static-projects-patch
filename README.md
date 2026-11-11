@@ -1,4 +1,4 @@
-# OpenCode checkout entries
+# OpenCode static projects patch
 
 A GUI-only patch for OpenCode **2.2.6 and 2.2.7**: manually add permanent clones of the same repository as separate project entries.
 
@@ -10,7 +10,7 @@ A GUI-only patch for OpenCode **2.2.6 and 2.2.7**: manually add permanent clones
 - Organized sidebar groups all visible servers, with their projects and sessions underneath. Switching sessions does not hide the other server's projects.
 - No automatic cloning, worktree allocation, recycling, branch switching, or backend identity changes.
 
-This is a small patch distribution repository, not a fork of the entire upstream source tree. The upstream project is [anomalyco/opencode](https://github.com/anomalyco/opencode).
+This is an unofficial patch distribution repository, not a fork of the entire upstream source tree or an official OpenCode release. The upstream project is [anomalyco/opencode](https://github.com/anomalyco/opencode).
 
 ## Apply
 
@@ -20,8 +20,8 @@ Requires Git and Bun **1.4.4**. Use a fresh clone; do not apply over an installe
 git clone --branch v2.2.6 --depth 1 https://github.com/anomalyco/opencode.git opencode-patched
 cd opencode-patched
 git switch -c checkout-entries
-git apply --check /path/to/opencode-checkout-patch/checkout-entries-v2.2.6.patch
-git apply /path/to/opencode-checkout-patch/checkout-entries-v2.2.6.patch
+git apply --check /path/to/opencode-static-projects-patch/checkout-entries-v2.2.6.patch
+git apply /path/to/opencode-static-projects-patch/checkout-entries-v2.2.6.patch
 bun install --frozen-lockfile
 ```
 
@@ -47,7 +47,7 @@ For a native Electron build, follow upstream's `packages/desktop/README.md`. Thi
 Before building the native app, overlay the green icon assets from this repository onto the upstream checkout:
 
 ```sh
-cp -R /path/to/opencode-checkout-patch/macos-icons/. packages/desktop/icons/prod/
+cp -R /path/to/opencode-static-projects-patch/macos-icons/. packages/desktop/icons/prod/
 ```
 
 Build with `OPENCODE_CHANNEL=prod`. The assets cover the running Dock icon, the ICNS fallback, and the macOS 26 Icon Composer icon. They retain OpenCode's design with a green tint so the patched app is distinguishable from the official app. The bundle identity and existing preferences are unchanged.
