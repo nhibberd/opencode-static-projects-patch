@@ -1,79 +1,5 @@
-From 18ef0cfd96cdf14c8f7a49d986f80f91888c0ea6 Mon Sep 17 00:00:00 2001
-From: Nick Hibberd <nhibberd@gmail.com>
-Date: Wed, 11 Nov 2026 10:02:39 -0600
-Subject: [PATCH] fix(app): preserve manually opened checkout entries
-
----
- CHECKOUT_ENTRIES.md                           | 42 ++++++++++
- packages/app/e2e/regression/home.spec.ts      | 78 +++++++++++++++++++
- packages/app/e2e/utils/mock-server.ts         | 10 +++
- .../app/src/new-session/project/controller.ts | 16 ++--
- .../src/new-session/workspace/controller.ts   | 10 ++-
- packages/app/src/runtime/server/checkouts.ts  | 47 +++++++++++
- .../src/runtime/server/persistence.test.ts    | 13 +++-
- .../app/src/runtime/server/persistence.ts     | 16 +++-
- .../app/src/runtime/server/registry.test.ts   | 30 +++++++
- packages/app/src/runtime/server/registry.tsx  | 61 ++++++++++++++-
- packages/app/src/runtime/server/runtime.tsx   | 51 +++++++++---
- packages/app/src/settings/shell.tsx           |  5 +-
- .../src/settings/workspaces/project-model.ts  | 10 ++-
- .../src/settings/workspaces/project-row.tsx   |  2 +
- .../app/src/settings/workspaces/projects.tsx  | 15 ++--
- .../src/shell/titlebar/sidebar-organized.tsx  | 12 +--
- 16 files changed, 373 insertions(+), 45 deletions(-)
- create mode 100644 CHECKOUT_ENTRIES.md
- create mode 100644 packages/app/src/runtime/server/checkouts.ts
-
-diff --git a/CHECKOUT_ENTRIES.md b/CHECKOUT_ENTRIES.md
-new file mode 100644
-index 0000000..17d0a5f
---- /dev/null
-+++ b/CHECKOUT_ENTRIES.md
-@@ -0,0 +1,42 @@
-+# Separate checkout entries
-+
-+GUI-only patch for OpenCode **v2.2.6** (`dc2ffcf8bf26f9e669b6aa22b95f50e12be15e06`).
-+
-+Use **Add project** for each permanent clone or checkout. Directories sharing a repository ID stay separate in Home, Settings > Projects, the New Session picker, and the organized sidebar. Selecting Local in a new session targets the selected checkout, not the repository's canonical clone.
-+
-+Checkout entries survive reloads and can be closed independently. Secondary checkouts default to their folder name and can be renamed independently. Their labels are client-local. The primary project's existing server-backed name, icons, commands, repository identity, and session IDs are unchanged. Other repository-level settings remain shared.
-+
-+This patch does not create, copy, allocate, recycle, delete, or switch any checkout. Prepare the directories and switch their branches yourself. Two entries pointing to the same directory do not provide isolation.
-+
-+## Build and try without replacing the installed app
-+
-+Use Bun 1.4.4, pinned by the repository. From the repository root:
-+
-+```sh
-+bun install --frozen-lockfile
-+cd packages/app
-+VITE_OPENCODE_SERVER_MODE=none bun run build
-+bun run serve -- --host 127.0.0.1 --port 4444
-+```
-+
-+Open <http://127.0.0.1:4444> and connect to the existing OpenCode 2.2.6 server using its address and sign-in/pairing flow. This is a separate browser client: it has its own project preferences, while sessions stay on the existing server. Do not start a replacement backend. The `none` build mode prevents the static preview from being mistaken for an API server.
-+
-+The same app source is used by the Electron renderer. Native desktop build and packaging instructions are in `packages/desktop/README.md`; a native installer is not included here. No installed application or running service is modified by this patch or the browser build.
-+
-+## Validation
-+
-+```sh
-+# Repository lint and package typechecks (from repository root)
-+bun run check
-+
-+# App unit tests (from packages/app)
-+bun run test:unit
-+
-+# Production-build browser regression suite (from packages/app)
-+bun x playwright install chromium
-+PLAYWRIGHT_BUILD=1 bun x playwright test e2e/regression/home.spec.ts --project chromium
-+```
-+
-+The clone regression adds a secondary directory through the folder picker, reloads, selects each checkout independently, submits a session and checks its exact directory, renames the secondary checkout, reloads again, and closes only that entry. Registry tests cover persisted entries with a shared project ID, independent labels, last selection, and removal. Existing tests cover older preference migration and delayed desktop storage.
-+
-+The separate `typecheck:e2e` command currently reports unrelated existing fixture/type errors and missing Vite asset declarations. The canonical repository check and app typecheck are the supported checks for production source.
 diff --git a/packages/app/e2e/regression/home.spec.ts b/packages/app/e2e/regression/home.spec.ts
-index 85734ab..6996614 100644
+index 85734ab..d1f2179 100644
 --- a/packages/app/e2e/regression/home.spec.ts
 +++ b/packages/app/e2e/regression/home.spec.ts
 @@ -5,6 +5,7 @@ import {
@@ -84,7 +10,7 @@ index 85734ab..6996614 100644
    REMOTE_SERVER,
    seed,
    SERVER,
-@@ -357,6 +358,83 @@ test("Home migrates the directories an older build listed to the server's curren
+@@ -357,6 +358,126 @@ test("Home migrates the directories an older build listed to the server's curren
      .toMatchObject({ usedProjectIDs: { local: ["proj_api", "proj_web"] }, projects: {} })
  })
  
@@ -93,7 +19,7 @@ index 85734ab..6996614 100644
 +}) => {
 +  const primary = "/checkouts/main"
 +  const secondary = "/checkouts/slot-1"
-+  const repo = project({ id: "proj_shared", directory: primary, name: "Main checkout" })
++  const repo = { ...project({ id: "proj_shared", directory: primary, name: "Main checkout" }), icon: { color: "blue" } }
 +  const created: string[] = []
 +  await mockOpenCodeServer(page, {
 +    directory: primary,
@@ -151,9 +77,52 @@ index 85734ab..6996614 100644
 +  await name.fill("API checkout")
 +  await name.press("Enter")
 +  await expect(settings.getByRole("button", { name: "API checkout", exact: true })).toBeVisible()
++  await settings.getByRole("button", { name: "API checkout", exact: true }).click()
++  await settings.getByRole("button", { name: "Select orange color", exact: true }).click()
++  await expect(settings.getByRole("button", { name: "Select orange color", exact: true })).toHaveAttribute(
++    "aria-pressed",
++    "true",
++  )
++  await settings.locator('input[type="file"]').setInputFiles({
++    name: "checkout.svg",
++    mimeType: "image/svg+xml",
++    buffer: Buffer.from(
++      '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="red"/></svg>',
++    ),
++  })
++  await expect(settings.getByRole("button", { name: "Project icon", exact: true }).locator("img")).toHaveCount(1)
++  await settings.getByRole("button", { name: "Back to projects", exact: true }).click()
++  await settings.getByRole("button", { name: "Main checkout", exact: true }).click()
++  await expect(settings.getByRole("button", { name: "Project icon", exact: true }).locator("img")).toHaveCount(0)
++  await expect(settings.getByRole("button", { name: "Select blue color", exact: true })).toHaveAttribute(
++    "aria-pressed",
++    "true",
++  )
++  await settings.getByRole("button", { name: "Select green color", exact: true }).click()
 +  await page.getByRole("button", { name: "Home", exact: true }).click()
 +  await page.reload()
 +  await expect(labels).toHaveText(["Main checkout", "API checkout"])
++  await page.getByRole("button", { name: "Settings", exact: true }).click()
++  await settings.getByRole("tab", { name: "Projects", exact: true }).click()
++
++  for (const [checkout, color] of [
++    ["Main checkout", "green"],
++    ["API checkout", "orange"],
++  ]) {
++    await settings.getByRole("button", { name: checkout, exact: true }).click()
++    const icon = settings.getByRole("button", { name: "Project icon", exact: true })
++    await expect(icon.locator("img")).toHaveCount(checkout === "API checkout" ? 1 : 0)
++
++    if (checkout === "API checkout") await icon.click()
++
++    await expect(settings.getByRole("button", { name: `Select ${color} color`, exact: true })).toHaveAttribute(
++      "aria-pressed",
++      "true",
++    )
++    await settings.getByRole("button", { name: "Back to projects", exact: true }).click()
++  }
++
++  await page.getByRole("button", { name: "Home", exact: true }).click()
 +  await projects
 +    .filter({ hasText: "API checkout" })
 +    .locator("..")
@@ -169,7 +138,7 @@ index 85734ab..6996614 100644
    const listed = [entry("alpha", 2), entry("beta", 1)]
    const view = await homeProjects(page, listed)
 diff --git a/packages/app/e2e/utils/mock-server.ts b/packages/app/e2e/utils/mock-server.ts
-index d87f100..d4b887e 100644
+index 8ed3d5e..fbcc6fc 100644
 --- a/packages/app/e2e/utils/mock-server.ts
 +++ b/packages/app/e2e/utils/mock-server.ts
 @@ -78,6 +78,8 @@ export interface MockServerConfig {
@@ -181,7 +150,7 @@ index d87f100..d4b887e 100644
    sessions: MockSession[]
    pageMessages: (
      sessionId: string,
-@@ -1465,6 +1467,14 @@ function mockHandlers(
+@@ -1483,6 +1485,14 @@ function mockHandlers(
  
  // The requested workspace (directory) inside its listed project, else inside the configured project.
  function location(config: MockServerConfig, directory = config.directory) {
@@ -293,59 +262,6 @@ index 77ff4ec..18f212f 100644
        sdk().directory,
    )
  
-diff --git a/packages/app/src/runtime/server/checkouts.ts b/packages/app/src/runtime/server/checkouts.ts
-new file mode 100644
-index 0000000..9a79ce9
---- /dev/null
-+++ b/packages/app/src/runtime/server/checkouts.ts
-@@ -0,0 +1,47 @@
-+import { containsDirectory } from "@opencode/util/path"
-+import { pathKey } from "@/workspaces/path-key"
-+import type { Project } from "./types"
-+
-+export type Checkout = { projectID: string; directory: string; name?: string }
-+
-+export function checkoutProjects(projects: readonly Project[], checkouts: readonly Checkout[]): Project[] {
-+  return checkouts
-+    .flatMap((checkout) => {
-+      const key = pathKey(checkout.directory)
-+
-+      const project =
-+        projects.find((item) => pathKey(item.worktree) === key || item.sandboxes.includes(checkout.directory)) ??
-+        projects.find((item) => item.id === checkout.projectID)
-+
-+      if (!project) return []
-+
-+      const canonical = pathKey(project.worktree) === key
-+      const sandboxes = canonical
-+        ? project.sandboxes.filter(
-+            (directory) => !checkouts.some((item) => pathKey(item.directory) === pathKey(directory)),
-+          )
-+        : []
-+
-+      return [
-+        {
-+          ...project,
-+          worktree: checkout.directory,
-+          name: checkout.name ?? (canonical ? project.name : undefined),
-+          sandboxes,
-+          worktrees: project.worktrees.filter(
-+            (item) => pathKey(item.directory) === key || sandboxes.includes(item.directory),
-+          ),
-+        },
-+      ]
-+    })
-+    .toSorted((a, b) => b.time.active - a.time.active)
-+}
-+
-+export function checkoutForDirectory(projects: readonly Project[], directory: string) {
-+  return (
-+    projects
-+      .filter((project) => containsDirectory(project.worktree, directory))
-+      .toSorted((a, b) => b.worktree.length - a.worktree.length)[0] ??
-+    projects.find((project) => project.sandboxes.some((sandbox) => containsDirectory(sandbox, directory)))
-+  )
-+}
 diff --git a/packages/app/src/runtime/server/persistence.test.ts b/packages/app/src/runtime/server/persistence.test.ts
 index 10ed3af..20aca44 100644
 --- a/packages/app/src/runtime/server/persistence.test.ts
@@ -378,7 +294,7 @@ index 10ed3af..20aca44 100644
        projects: { local: [{ worktree: "/project" }] },
      })
 diff --git a/packages/app/src/runtime/server/persistence.ts b/packages/app/src/runtime/server/persistence.ts
-index ec87717..b1bdd02 100644
+index ec87717..ffcddaf 100644
 --- a/packages/app/src/runtime/server/persistence.ts
 +++ b/packages/app/src/runtime/server/persistence.ts
 @@ -29,10 +29,8 @@ const StoredServer = Schema.Union([ServerHttp, ServerHttpBase, Schema.String]).p
@@ -394,7 +310,7 @@ index ec87717..b1bdd02 100644
  export const ServerState = Persistence.struct({
    list: Persistence.array(StoredServer),
    hidden: Schema.Record(
-@@ -44,6 +42,16 @@ export const ServerState = Persistence.struct({
+@@ -44,6 +42,22 @@ export const ServerState = Persistence.struct({
      Schema.mutableKey(Schema.String.pipe(Schema.catchDecoding(() => Effect.succeed(Option.none())))),
    ),
    usedProjectIDs: Persistence.record(Persistence.array(Schema.String)),
@@ -404,6 +320,12 @@ index ec87717..b1bdd02 100644
 +        projectID: Schema.String,
 +        directory: Schema.String,
 +        name: Schema.optional(Schema.String),
++        icon: Schema.optional(
++          Persistence.struct({
++            color: Schema.optional(Schema.String),
++            override: Schema.optional(Schema.String),
++          }),
++        ),
 +      }),
 +    ),
 +  ),
@@ -457,18 +379,20 @@ index 03ed725..62508f9 100644
 +  expect(reopened.used()).toEqual([])
 +})
 diff --git a/packages/app/src/runtime/server/registry.tsx b/packages/app/src/runtime/server/registry.tsx
-index 4efb107..1acf34a 100644
+index 4efb107..3d19405 100644
 --- a/packages/app/src/runtime/server/registry.tsx
 +++ b/packages/app/src/runtime/server/registry.tsx
-@@ -4,6 +4,7 @@ import { batch, createMemo } from "solid-js"
+@@ -4,7 +4,9 @@ import { batch, createMemo } from "solid-js"
  import { reconcile, type SetStoreFunction, type Store } from "solid-js/store"
  import { Persist, persisted } from "@/runtime/persistence/storage"
  import { ServerScope } from "@/runtime/server/scope"
 +import { pathKey } from "@/workspaces/path-key"
  import type { PluginServerStatus } from "./plugin-machine"
++import type { Checkout } from "./checkouts"
  import { ServerHttp, ServerHttpBase, ServerKey, ServerState } from "./persistence"
  
-@@ -47,7 +48,7 @@ function loopbackOrigin(url: string) {
+ type StoredState = typeof ServerState.Type
+@@ -47,7 +49,7 @@ function loopbackOrigin(url: string) {
    return `${parsed.protocol}//127.0.0.1:${parsed.port || (parsed.protocol === "https:" ? "443" : "80")}`
  }
  
@@ -477,7 +401,7 @@ index 4efb107..1acf34a 100644
  export function createServerProjects(input: {
    scope: () => ServerScope
    store: Store<StoredState>
-@@ -63,13 +64,58 @@ export function createServerProjects(input: {
+@@ -63,13 +65,74 @@ export function createServerProjects(input: {
    }
  
    return {
@@ -489,6 +413,7 @@ index 4efb107..1acf34a 100644
 +    },
 +    rename(directory: string, name: string) {
 +      const entries = input.store.checkouts[input.scope()] ?? []
++
 +      if (!entries.some((entry) => pathKey(entry.directory) === pathKey(directory))) return false
 +
 +      input.setStore(
@@ -496,6 +421,20 @@ index 4efb107..1acf34a 100644
 +        input.scope(),
 +        entries.map((entry) => (pathKey(entry.directory) === pathKey(directory) ? { ...entry, name } : entry)),
 +      )
++
++      return true
++    },
++    updateIcon(directory: string, icon: NonNullable<Checkout["icon"]>) {
++      const entries = input.store.checkouts[input.scope()] ?? []
++
++      if (!entries.some((entry) => pathKey(entry.directory) === pathKey(directory))) return false
++
++      input.setStore(
++        "checkouts",
++        input.scope(),
++        entries.map((entry) => (pathKey(entry.directory) === pathKey(directory) ? { ...entry, icon } : entry)),
++      )
++
 +      return true
 +    },
 +    hideCheckout(directory: string) {
@@ -509,6 +448,7 @@ index 4efb107..1acf34a 100644
 +          input.scope(),
 +          used().filter((id) => next.some((entry) => entry.projectID === id)),
 +        )
++
 +        if (pathKey(input.store.lastCheckout[input.scope()] ?? "") === pathKey(directory))
 +          input.setStore("lastCheckout", input.scope(), next.at(-1)?.directory ?? "")
 +      })
@@ -537,7 +477,7 @@ index 4efb107..1acf34a 100644
        })
      },
      used,
-@@ -238,7 +284,16 @@ export const { use: useServers, provider: ServersProvider } = createSimpleContex
+@@ -238,7 +301,16 @@ export const { use: useServers, provider: ServersProvider } = createSimpleContex
          previousKey: "server.v3",
        },
        ServerState,
@@ -556,14 +496,14 @@ index 4efb107..1acf34a 100644
  
      const language = useLanguage()
 diff --git a/packages/app/src/runtime/server/runtime.tsx b/packages/app/src/runtime/server/runtime.tsx
-index dfccc14..119a8c8 100644
+index dfccc14..9a16b65 100644
 --- a/packages/app/src/runtime/server/runtime.tsx
 +++ b/packages/app/src/runtime/server/runtime.tsx
 @@ -46,6 +46,7 @@ import type { SessionInfo } from "@opencode/client/promise"
  import { projectForSession } from "@/shell/layout/helpers"
  import { isProjectDirectory } from "@/workspaces/paths"
  import type { Project } from "@/runtime/server/types"
-+import { checkoutForDirectory, checkoutProjects } from "./checkouts"
++import { checkoutForDirectory, checkoutProjects, type Checkout } from "./checkouts"
  
  export const { use: useGlobal, provider: GlobalProvider } = createSimpleContext({
    name: "Global",
@@ -595,7 +535,7 @@ index dfccc14..119a8c8 100644
      const key = pathKey(directory)
  
      return (
-@@ -304,12 +312,23 @@ function createServerController(
+@@ -304,12 +312,24 @@ function createServerController(
      )
    }
  
@@ -615,6 +555,7 @@ index dfccc14..119a8c8 100644
 +            return project ? [{ projectID: project.id, directory: project.worktree }] : []
 +          })
 +        : used().map((project) => ({ projectID: project.id, directory: project.worktree }))
++
 +      projects.migrateCheckouts(entries)
 +
 +      if (legacy) projects.migrate(entries.map((entry) => entry.projectID))
@@ -622,7 +563,7 @@ index dfccc14..119a8c8 100644
    })
  
    // Resolving a directory registers its project on the server; the list then reloads to include it, and the
-@@ -319,9 +338,10 @@ function createServerController(
+@@ -319,9 +339,10 @@ function createServerController(
        .get({ location: { directory } })
        .then(async (location) => {
          await sync.project.refresh()
@@ -635,7 +576,7 @@ index dfccc14..119a8c8 100644
        })
        .catch((error) => {
          showToast({
-@@ -347,18 +367,27 @@ function createServerController(
+@@ -347,18 +368,42 @@ function createServerController(
        used,
        add,
        forDirectory,
@@ -650,6 +591,21 @@ index dfccc14..119a8c8 100644
 +        if (list().some((project) => pathKey(project.worktree) === pathKey(directory))) return false
 +
 +        return projects.rename(directory, name)
++      },
++      updateIcon(directory: string, icon: NonNullable<Checkout["icon"]>) {
++        const entries = projects.checkouts() ?? []
++        const entry = entries.find((item) => pathKey(item.directory) === pathKey(directory))
++
++        if (!entry) return false
++
++        if (
++          !entry.icon &&
++          list().some((project) => pathKey(project.worktree) === pathKey(directory)) &&
++          entries.filter((item) => item.projectID === entry.projectID).length < 2
++        )
++          return false
++
++        return projects.updateIcon(directory, icon)
 +      },
        // Marks the project of a directory as used from this client, and as the last one.
        touch(directory: string) {
@@ -686,15 +642,16 @@ index fb0af1c..e4f0883 100644
    const targetServer = createMemo(() => {
      const view = surface.view()
 diff --git a/packages/app/src/settings/workspaces/project-model.ts b/packages/app/src/settings/workspaces/project-model.ts
-index e7359fc..6e88c29 100644
+index e7359fc..c718aa7 100644
 --- a/packages/app/src/settings/workspaces/project-model.ts
 +++ b/packages/app/src/settings/workspaces/project-model.ts
-@@ -61,15 +61,21 @@ export function createEditProjectModel(props: { project: LocalProject; server: S
+@@ -61,15 +61,22 @@ export function createEditProjectModel(props: { project: LocalProject; server: S
    }
  
    const request = (target: ProjectTarget, patch: ProjectPatch, signal: AbortSignal): Promise<void> => {
 +    const local = patch.name !== undefined && serverCtx.projects.rename(target.worktree, patch.name)
-+    const shared = { ...patch, name: local ? undefined : patch.name }
++    const localIcon = patch.icon !== undefined && serverCtx.projects.updateIcon(target.worktree, patch.icon)
++    const shared = { ...patch, name: local ? undefined : patch.name, icon: localIcon ? undefined : patch.icon }
 +
 +    if (shared.name === undefined && shared.icon === undefined && shared.commands === undefined)
 +      return Promise.resolve()
@@ -714,7 +671,7 @@ index e7359fc..6e88c29 100644
  
    const run = (effect: ProjectSettingsEffect) => {
 diff --git a/packages/app/src/settings/workspaces/project-row.tsx b/packages/app/src/settings/workspaces/project-row.tsx
-index f644740..d36b08e 100644
+index 8a4f02d..f7f4380 100644
 --- a/packages/app/src/settings/workspaces/project-row.tsx
 +++ b/packages/app/src/settings/workspaces/project-row.tsx
 @@ -38,6 +38,8 @@ export function SettingsProjectRow(props: {
@@ -811,6 +768,111 @@ index 2a60bbc..23806b4 100644
  
                  const projectSessions = () => grouped().get(pathKey(project().worktree)) ?? []
  
--- 
-2.43.0
-
+diff --git a/CHECKOUT_ENTRIES.md b/CHECKOUT_ENTRIES.md
+new file mode 100644
+index 0000000..4e3004d
+--- /dev/null
++++ b/CHECKOUT_ENTRIES.md
+@@ -0,0 +1,42 @@
++# Separate checkout entries
++
++GUI-only patch for OpenCode **v2.2.6** (`dc2ffcf8bf26f9e669b6aa22b95f50e12be15e06`) and **v2.2.7** (`fedc6f208aa2bd54c1019227214568083f6380ad`).
++
++Use **Add project** for each permanent clone or checkout. Directories sharing a repository ID stay separate in Home, Settings > Projects, the New Session picker, and the organized sidebar. Selecting Local in a new session targets the selected checkout, not the repository's canonical clone.
++
++Checkout entries survive reloads and can be closed independently. Secondary checkouts default to their folder name and can be renamed independently. Their labels are client-local. Icon colors and uploaded images are client-local for secondary checkouts and for the primary checkout when multiple entries share its repository. Local icon choices survive reloads and closing sibling entries. Single-entry primary projects retain server-backed appearance settings. The primary project's name, commands, repository identity, and session IDs remain server-backed. Other repository-level settings remain shared.
++
++This patch does not create, copy, allocate, recycle, delete, or switch any checkout. Prepare the directories and switch their branches yourself. Two entries pointing to the same directory do not provide isolation.
++
++## Build and try without replacing the installed app
++
++Use Bun 1.4.4, pinned by the repository. From the repository root:
++
++```sh
++bun install --frozen-lockfile
++cd packages/app
++VITE_OPENCODE_SERVER_MODE=none bun run build
++bun run serve -- --host 127.0.0.1 --port 4444
++```
++
++Open <http://127.0.0.1:4444> and connect to the existing OpenCode 2.2.6 server using its address and sign-in/pairing flow. This is a separate browser client: it has its own project preferences, while sessions stay on the existing server. Do not start a replacement backend. The `none` build mode prevents the static preview from being mistaken for an API server.
++
++The same app source is used by the Electron renderer. Native desktop build and packaging instructions are in `packages/desktop/README.md`; a native installer is not included here. No installed application or running service is modified by this patch or the browser build.
++
++## Validation
++
++```sh
++# Repository lint and package typechecks (from repository root)
++bun run check
++
++# App unit tests (from packages/app)
++bun run test:unit
++
++# Production-build browser regression suite (from packages/app)
++bun x playwright install chromium
++PLAYWRIGHT_BUILD=1 bun x playwright test e2e/regression/home.spec.ts --project chromium
++```
++
++The clone regression adds a secondary directory through the folder picker, reloads, selects each checkout independently, submits a session and checks its exact directory, renames the secondary checkout, customizes colors and an uploaded icon independently, reloads again, and closes only that entry. Registry tests cover persisted entries with a shared project ID, independent labels, last selection, and removal. Existing tests cover older preference migration and delayed desktop storage.
++
++The separate `typecheck:e2e` command currently reports unrelated existing fixture/type errors and missing Vite asset declarations. The canonical repository check and app typecheck are the supported checks for production source.
+diff --git a/packages/app/src/runtime/server/checkouts.ts b/packages/app/src/runtime/server/checkouts.ts
+new file mode 100644
+index 0000000..11bc6bd
+--- /dev/null
++++ b/packages/app/src/runtime/server/checkouts.ts
+@@ -0,0 +1,54 @@
++import { containsDirectory } from "@opencode/util/path"
++import { pathKey } from "@/workspaces/path-key"
++import type { Project } from "./types"
++
++export type Checkout = {
++  projectID: string
++  directory: string
++  name?: string
++  icon?: Pick<NonNullable<Project["icon"]>, "color" | "override">
++}
++
++export function checkoutProjects(projects: readonly Project[], checkouts: readonly Checkout[]): Project[] {
++  return checkouts
++    .flatMap((checkout) => {
++      const key = pathKey(checkout.directory)
++
++      const project =
++        projects.find((item) => pathKey(item.worktree) === key || item.sandboxes.includes(checkout.directory)) ??
++        projects.find((item) => item.id === checkout.projectID)
++
++      if (!project) return []
++
++      const canonical = pathKey(project.worktree) === key
++
++      const sandboxes = canonical
++        ? project.sandboxes.filter(
++            (directory) => !checkouts.some((item) => pathKey(item.directory) === pathKey(directory)),
++          )
++        : []
++
++      return [
++        {
++          ...project,
++          worktree: checkout.directory,
++          name: checkout.name ?? (canonical ? project.name : undefined),
++          icon: checkout.icon ? { ...project.icon, ...checkout.icon } : project.icon,
++          sandboxes,
++          worktrees: project.worktrees.filter(
++            (item) => pathKey(item.directory) === key || sandboxes.includes(item.directory),
++          ),
++        },
++      ]
++    })
++    .toSorted((a, b) => b.time.active - a.time.active)
++}
++
++export function checkoutForDirectory(projects: readonly Project[], directory: string) {
++  return (
++    projects
++      .filter((project) => containsDirectory(project.worktree, directory))
++      .toSorted((a, b) => b.worktree.length - a.worktree.length)[0] ??
++    projects.find((project) => project.sandboxes.some((sandbox) => containsDirectory(sandbox, directory)))
++  )
++}

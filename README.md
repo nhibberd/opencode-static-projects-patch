@@ -1,11 +1,12 @@
 # OpenCode checkout entries
 
-A GUI-only patch for OpenCode **2.2.6**: manually add permanent clones of the same repository as separate project entries.
+A GUI-only patch for OpenCode **2.2.6 and 2.2.7**: manually add permanent clones of the same repository as separate project entries.
 
 - Separate Home, Settings, New Session, and organized-sidebar entries.
 - Persistent checkout selection and independent closing.
 - New sessions run in the selected checkout, not the canonical clone.
 - Secondary checkouts can have independent client-local names.
+- Checkout-local icon colors and uploaded images, including the primary checkout when sibling entries exist.
 - No automatic cloning, worktree allocation, recycling, branch switching, or backend identity changes.
 
 This is a small patch distribution repository, not a fork of the entire upstream source tree. The upstream project is [anomalyco/opencode](https://github.com/anomalyco/opencode).
@@ -24,7 +25,9 @@ bun install --frozen-lockfile
 ```
 
 Base commit: `dc2ffcf8bf26f9e669b6aa22b95f50e12be15e06`.
-Implementation commit in the local source checkout: `18ef0cf`.
+The patch also applies to **2.2.7**, base commit `fedc6f208aa2bd54c1019227214568083f6380ad`. Substitute `v2.2.7` in the clone command; the patch filename is unchanged.
+
+Icon preferences are local to this GUI, not synced through the repository's shared backend identity. Existing colors are inherited until you customize each checkout. Single-entry primary projects keep normal server-backed appearance settings. Commands and other repository-level settings remain shared.
 
 ## Try the browser GUI without replacing the installed app
 
@@ -41,6 +44,14 @@ For a native Electron build, follow upstream's `packages/desktop/README.md`. Thi
 See `CHECKOUT_ENTRIES.md` inside the applied patch for behavior, limitations, and verification commands.
 
 ## Verification
+
+Icon-isolation follow-up on **2.2.7**:
+
+- App typecheck and 10 registry/persistence tests: passed.
+- Four production-build browser regressions: passed. These cover independent colors and uploaded icons across reload, plus existing single-project autosave, removal, and retry behavior.
+- The extended clone regression failed on the previous patch because changing the secondary color changed the primary color.
+
+Original **2.2.6** patch verification:
 
 - Canonical `bun run check`: passed (upstream lint warnings remain).
 - App unit suite: 2,583 passed.
