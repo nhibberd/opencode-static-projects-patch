@@ -138,10 +138,10 @@ index 85734ab..d1f2179 100644
    const listed = [entry("alpha", 2), entry("beta", 1)]
    const view = await homeProjects(page, listed)
 diff --git a/packages/app/e2e/regression/multi-server.spec.ts b/packages/app/e2e/regression/multi-server.spec.ts
-index e42837e..0c0b9ff 100644
+index e42837e..d929970 100644
 --- a/packages/app/e2e/regression/multi-server.spec.ts
 +++ b/packages/app/e2e/regression/multi-server.spec.ts
-@@ -122,6 +122,59 @@ const reply = (sessionID: string, permissionID: string) => ({
+@@ -122,6 +122,72 @@ const reply = (sessionID: string, permissionID: string) => ({
    body: { decision: "once" },
  })
  
@@ -154,7 +154,10 @@ index e42837e..0c0b9ff 100644
 +    [SERVER]: {
 +      directory,
 +      project: project({ id: projectID, directory, name: "code" }),
-+      sessions: [session({ id, directory, projectID, title: "Local work" })],
++      sessions: [
++        session({ id, directory, projectID, title: "Local work" }),
++        session({ id: "ses_other", directory, projectID, title: "Other local work" }),
++      ],
 +      pageMessages: () => ({ items: [] }),
 +    },
 +    [REMOTE_SERVER]: {
@@ -187,10 +190,20 @@ index e42837e..0c0b9ff 100644
 +  await remote.getByRole("button", { name: /Remote work$/ }).click()
 +  await expectPath(page, sessionHref(id, REMOTE_SERVER))
 +  await expectSessionTitle(page, "Remote work")
++  await expect(page.getByRole("textbox", { name: "Prompt", exact: true })).toBeFocused()
 +  await expect(local.getByRole("button", { name: /Local work$/ })).toBeVisible()
 +  await local.getByRole("button", { name: /Local work$/ }).click()
 +  await expectPath(page, sessionHref(id))
 +  await expectSessionTitle(page, "Local work")
++  await expect(page.getByRole("textbox", { name: "Prompt", exact: true })).toBeFocused()
++  await local.getByRole("button", { name: /Other local work$/ }).click()
++  await expectPath(page, sessionHref("ses_other"))
++  await expectSessionTitle(page, "Other local work")
++  await expect(page.getByRole("textbox", { name: "Prompt", exact: true })).toBeFocused()
++  await local.getByRole("button", { name: /Local work$/ }).click()
++  await expectPath(page, sessionHref(id))
++  await expectSessionTitle(page, "Local work")
++  await expect(page.getByRole("textbox", { name: "Prompt", exact: true })).toBeFocused()
 +  await expect(remote.getByRole("button", { name: /Remote work$/ })).toBeVisible()
 +
 +  await page.reload()
@@ -689,6 +702,55 @@ index dfccc14..9a16b65 100644
        },
      },
      notification,
+diff --git a/packages/app/src/session/composer/focus.tsx b/packages/app/src/session/composer/focus.tsx
+index c59a609..7805d4f 100644
+--- a/packages/app/src/session/composer/focus.tsx
++++ b/packages/app/src/session/composer/focus.tsx
+@@ -49,10 +49,10 @@ export function useComposerFocus(sessionID: string) {
+   return focus
+ }
+ 
+-// The tab link that opened the session passes focus on, unless it sits in a dialog, such as the mobile tabs drawer
++// The navigation control that opened the session passes focus on, unless it sits in a dialog, such as the mobile tabs drawer
+ // reopened before the composer.
+-export function isTitlebarTabLink(element: Element) {
+-  return element.matches("[data-titlebar-tab-link]") && !element.closest('[role="dialog"]')
++export function isSessionNavigationControl(element: Element) {
++  return element.matches("[data-titlebar-tab-link], [data-session-navigation]") && !element.closest('[role="dialog"]')
+ }
+ 
+ function createComposerFocus() {
+@@ -116,7 +116,7 @@ function createComposerFocus() {
+     if (active && element.contains(active)) return "focused"
+ 
+     // A control chosen while the session was loading owns focus now.
+-    if (active && active !== document.body && !isTitlebarTabLink(active)) return "claimed"
++    if (active && active !== document.body && !isSessionNavigationControl(active)) return "claimed"
+     element.focus({ preventScroll: true })
+     setCursorPosition(element, effect.cursor)
+ 
+diff --git a/packages/app/src/session/preparing-composer.tsx b/packages/app/src/session/preparing-composer.tsx
+index 70329f3..afe41a9 100644
+--- a/packages/app/src/session/preparing-composer.tsx
++++ b/packages/app/src/session/preparing-composer.tsx
+@@ -5,7 +5,7 @@ import { getCursorPosition } from "@/composer/editor/dom"
+ import { createComposerEditor } from "@/composer/editor/interaction"
+ import { promptLength } from "@/composer/prompt-parts"
+ import type { PendingSession } from "@/shell/tabs/tabs"
+-import { isTitlebarTabLink, useComposerFocus } from "./composer/focus"
++import { isSessionNavigationControl, useComposerFocus } from "./composer/focus"
+ 
+ export function PreparingComposer(props: { sessionID: string; pending: PendingSession }) {
+   const focus = useComposerFocus(props.sessionID)
+@@ -34,7 +34,7 @@ export function PreparingComposer(props: { sessionID: string; pending: PendingSe
+       // Removing the editor, or the window losing focus, is not the user leaving it.
+       if (!el.isConnected || !document.hasFocus() || document.activeElement === el) return
+ 
+-      if (event.relatedTarget instanceof Element && isTitlebarTabLink(event.relatedTarget)) return
++      if (event.relatedTarget instanceof Element && isSessionNavigationControl(event.relatedTarget)) return
+       focus.dispatch({ type: "preparing.blurred", target: props.sessionID })
+     })
+     // The editor stores the caret only on input, key up and pointer up. Keep it current while a key is held, so
 diff --git a/packages/app/src/settings/shell.tsx b/packages/app/src/settings/shell.tsx
 index fb0af1c..e4f0883 100644
 --- a/packages/app/src/settings/shell.tsx
@@ -788,6 +850,18 @@ index 4356d2c..307f0d7 100644
  
    createEffect(() => {
      if (!searchable()) setStore("filter", "")
+diff --git a/packages/app/src/shell/titlebar/project-session-row.tsx b/packages/app/src/shell/titlebar/project-session-row.tsx
+index 35a5c7e..4c5b7a3 100644
+--- a/packages/app/src/shell/titlebar/project-session-row.tsx
++++ b/packages/app/src/shell/titlebar/project-session-row.tsx
+@@ -120,6 +120,7 @@ export function ProjectSessionRow(props: {
+         as="button"
+         type="button"
+         data-titlebar-tab-action
++        data-session-navigation
+         data-state={props.active ? "pressed" : undefined}
+         class="relative flex h-7 w-full shrink-0 items-center gap-2 rounded-[6px] ps-8 pe-2 text-start text-[13px] leading-[var(--line-height-compact)] font-medium focus-visible:outline-none"
+         classList={{ "text-v2-text-text-base": props.active, "text-v2-text-text-faint": !props.active }}
 diff --git a/packages/app/src/shell/titlebar/sidebar-organized.tsx b/packages/app/src/shell/titlebar/sidebar-organized.tsx
 index 2a60bbc..4e9e08b 100644
 --- a/packages/app/src/shell/titlebar/sidebar-organized.tsx
@@ -932,10 +1006,10 @@ index 2a60bbc..4e9e08b 100644
        return props.index
 diff --git a/CHECKOUT_ENTRIES.md b/CHECKOUT_ENTRIES.md
 new file mode 100644
-index 0000000..1fbca06
+index 0000000..0373954
 --- /dev/null
 +++ b/CHECKOUT_ENTRIES.md
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,47 @@
 +# Separate checkout entries
 +
 +GUI-only patch for OpenCode **v2.2.6** (`dc2ffcf8bf26f9e669b6aa22b95f50e12be15e06`) and **v2.2.7** (`fedc6f208aa2bd54c1019227214568083f6380ad`).
@@ -945,6 +1019,8 @@ index 0000000..1fbca06
 +Checkout entries survive reloads and can be closed independently. Secondary checkouts default to their folder name and can be renamed independently. Their labels are client-local. Icon colors and uploaded images are client-local for secondary checkouts and for the primary checkout when multiple entries share its repository. Local icon choices survive reloads and closing sibling entries. Single-entry primary projects retain server-backed appearance settings. The primary project's name, commands, repository identity, and session IDs remain server-backed. Other repository-level settings remain shared.
 +
 +The organized vertical sidebar shows every visible server as a named group, with its projects and sessions underneath. Switching tabs does not switch away from the other groups. Project ordering and expansion remain scoped by server and checkout directory; session actions use the group's server even when names, paths, project IDs, or session IDs match another server.
++
++Opening a sidebar session passes focus to its prompt, just like a session tab. Existing protections against stealing focus from dialogs or other controls remain in place.
 +
 +This patch does not create, copy, allocate, recycle, delete, or switch any checkout. Prepare the directories and switch their branches yourself. Two entries pointing to the same directory do not provide isolation.
 +

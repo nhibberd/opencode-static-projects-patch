@@ -56,6 +56,11 @@ See `CHECKOUT_ENTRIES.md` inside the applied patch for behavior, limitations, an
 
 ## Verification
 
+Sidebar focus follow-up on **2.2.7**:
+
+- Opening a sidebar session hands focus to its prompt, both within a server and across servers. Dialogs and other focused controls keep their existing protections.
+- The browser regression reproduced the missing focus before the fix. Four focus/routing browser cases, 13 focus-machine unit tests, app typecheck, and focused lint passed.
+
 Multi-server sidebar follow-up on **2.2.7**:
 
 - Each visible server keeps its own project order, expansion state, and session list.
