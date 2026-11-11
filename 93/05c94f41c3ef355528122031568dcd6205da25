@@ -1,0 +1,19 @@
+README.md
+  s_e566707a8b0e0b::t_ba9839e517532a 1,13,23-24,50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9305c94f41c3ef355528122031568dcd6205da25",
+  "prompts": {},
+  "sessions": {
+    "s_e566707a8b0e0b": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e34e4b848ffeN57HqrPwG7ovAe",
+        "model": "unknown"
+      },
+      "human_author": "Nick Hibberd <nhibberd@gmail.com>"
+    }
+  }
+}
