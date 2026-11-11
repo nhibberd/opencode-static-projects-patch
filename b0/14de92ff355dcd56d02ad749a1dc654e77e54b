@@ -1,0 +1,21 @@
+README.md
+  s_e566707a8b0e0b::t_0e8a5c69335a5d 45-54
+macos-icons/icon.icon/icon.json
+  s_e566707a8b0e0b::t_231b82903a3cdd 1-25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b014de92ff355dcd56d02ad749a1dc654e77e54b",
+  "prompts": {},
+  "sessions": {
+    "s_e566707a8b0e0b": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e34e4b848ffeN57HqrPwG7ovAe",
+        "model": "unknown"
+      },
+      "human_author": "Nick Hibberd <nhibberd@gmail.com>"
+    }
+  }
+}
