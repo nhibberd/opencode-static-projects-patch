@@ -1,0 +1,816 @@
+From 18ef0cfd96cdf14c8f7a49d986f80f91888c0ea6 Mon Sep 17 00:00:00 2001
+From: Nick Hibberd <nhibberd@gmail.com>
+Date: Wed, 11 Nov 2026 10:02:39 -0600
+Subject: [PATCH] fix(app): preserve manually opened checkout entries
+
+---
+ CHECKOUT_ENTRIES.md                           | 42 ++++++++++
+ packages/app/e2e/regression/home.spec.ts      | 78 +++++++++++++++++++
+ packages/app/e2e/utils/mock-server.ts         | 10 +++
+ .../app/src/new-session/project/controller.ts | 16 ++--
+ .../src/new-session/workspace/controller.ts   | 10 ++-
+ packages/app/src/runtime/server/checkouts.ts  | 47 +++++++++++
+ .../src/runtime/server/persistence.test.ts    | 13 +++-
+ .../app/src/runtime/server/persistence.ts     | 16 +++-
+ .../app/src/runtime/server/registry.test.ts   | 30 +++++++
+ packages/app/src/runtime/server/registry.tsx  | 61 ++++++++++++++-
+ packages/app/src/runtime/server/runtime.tsx   | 51 +++++++++---
+ packages/app/src/settings/shell.tsx           |  5 +-
+ .../src/settings/workspaces/project-model.ts  | 10 ++-
+ .../src/settings/workspaces/project-row.tsx   |  2 +
+ .../app/src/settings/workspaces/projects.tsx  | 15 ++--
+ .../src/shell/titlebar/sidebar-organized.tsx  | 12 +--
+ 16 files changed, 373 insertions(+), 45 deletions(-)
+ create mode 100644 CHECKOUT_ENTRIES.md
+ create mode 100644 packages/app/src/runtime/server/checkouts.ts
+
+diff --git a/CHECKOUT_ENTRIES.md b/CHECKOUT_ENTRIES.md
+new file mode 100644
+index 0000000..17d0a5f
+--- /dev/null
++++ b/CHECKOUT_ENTRIES.md
+@@ -0,0 +1,42 @@
++# Separate checkout entries
++
++GUI-only patch for OpenCode **v2.2.6** (`dc2ffcf8bf26f9e669b6aa22b95f50e12be15e06`).
++
++Use **Add project** for each permanent clone or checkout. Directories sharing a repository ID stay separate in Home, Settings > Projects, the New Session picker, and the organized sidebar. Selecting Local in a new session targets the selected checkout, not the repository's canonical clone.
++
++Checkout entries survive reloads and can be closed independently. Secondary checkouts default to their folder name and can be renamed independently. Their labels are client-local. The primary project's existing server-backed name, icons, commands, repository identity, and session IDs are unchanged. Other repository-level settings remain shared.
++
++This patch does not create, copy, allocate, recycle, delete, or switch any checkout. Prepare the directories and switch their branches yourself. Two entries pointing to the same directory do not provide isolation.
++
++## Build and try without replacing the installed app
++
++Use Bun 1.4.4, pinned by the repository. From the repository root:
++
++```sh
++bun install --frozen-lockfile
++cd packages/app
++VITE_OPENCODE_SERVER_MODE=none bun run build
++bun run serve -- --host 127.0.0.1 --port 4444
++```
++
++Open <http://127.0.0.1:4444> and connect to the existing OpenCode 2.2.6 server using its address and sign-in/pairing flow. This is a separate browser client: it has its own project preferences, while sessions stay on the existing server. Do not start a replacement backend. The `none` build mode prevents the static preview from being mistaken for an API server.
++
++The same app source is used by the Electron renderer. Native desktop build and packaging instructions are in `packages/desktop/README.md`; a native installer is not included here. No installed application or running service is modified by this patch or the browser build.
++
++## Validation
++
++```sh
++# Repository lint and package typechecks (from repository root)
++bun run check
++
++# App unit tests (from packages/app)
++bun run test:unit
++
++# Production-build browser regression suite (from packages/app)
++bun x playwright install chromium
++PLAYWRIGHT_BUILD=1 bun x playwright test e2e/regression/home.spec.ts --project chromium
++```
++
++The clone regression adds a secondary directory through the folder picker, reloads, selects each checkout independently, submits a session and checks its exact directory, renames the secondary checkout, reloads again, and closes only that entry. Registry tests cover persisted entries with a shared project ID, independent labels, last selection, and removal. Existing tests cover older preference migration and delayed desktop storage.
++
++The separate `typecheck:e2e` command currently reports unrelated existing fixture/type errors and missing Vite asset declarations. The canonical repository check and app typecheck are the supported checks for production source.
+diff --git a/packages/app/e2e/regression/home.spec.ts b/packages/app/e2e/regression/home.spec.ts
+index 85734ab..6996614 100644
+--- a/packages/app/e2e/regression/home.spec.ts
++++ b/packages/app/e2e/regression/home.spec.ts
+@@ -5,6 +5,7 @@ import {
+   holdRoute,
+   NO_PROVIDER,
+   project,
++  provider,
+   REMOTE_SERVER,
+   seed,
+   SERVER,
+@@ -357,6 +358,83 @@ test("Home migrates the directories an older build listed to the server's curren
+     .toMatchObject({ usedProjectIDs: { local: ["proj_api", "proj_web"] }, projects: {} })
+ })
+ 
++test("manually added clones stay separate after reload and new sessions use the selected checkout", async ({
++  page,
++}) => {
++  const primary = "/checkouts/main"
++  const secondary = "/checkouts/slot-1"
++  const repo = project({ id: "proj_shared", directory: primary, name: "Main checkout" })
++  const created: string[] = []
++  await mockOpenCodeServer(page, {
++    directory: primary,
++    project: repo,
++    checkouts: [{ directory: secondary, projectID: repo.id, canonical: primary }],
++    provider: provider(),
++    onSessionCreate: (body) => void created.push(JSON.stringify(body.location)),
++    sessions: [
++      session({ id: "ses_primary", projectID: repo.id, directory: primary, title: "Primary task" }),
++      session({ id: "ses_secondary", projectID: repo.id, directory: secondary, title: "Secondary task" }),
++    ],
++    fileList: () => [],
++    pageMessages: () => ({ items: [] }),
++  })
++  await seed(page, { usedProjects: { local: [repo.id] } })
++  await page.goto("/")
++  const projects = page.locator('[data-component="home-project-row"]')
++  const labels = projects.locator('[data-slot="home-row-label"]')
++  await expect(labels).toHaveText(["Main checkout"])
++
++  await page.getByRole("button", { name: "Add project", exact: true }).click()
++  const picker = page.getByRole("dialog", { name: "Open project", exact: true })
++  await expect(picker.getByRole("button", { name: "Select folder", exact: true })).toBeEnabled()
++  await picker.getByRole("combobox").fill(secondary)
++  await picker.getByRole("combobox").press("Enter")
++  await picker.getByRole("button", { name: "Select folder", exact: true }).click()
++  await expect(labels).toHaveText(["Main checkout", "slot-1"])
++  await page.reload()
++  await expect(labels).toHaveText(["Main checkout", "slot-1"])
++
++  const slot = projects.filter({ hasText: "slot-1" })
++  await expect(slot).toHaveAttribute("data-selected", "")
++  await projects.filter({ hasText: "Main checkout" }).click()
++  await expect(row(page, "Primary task")).toBeVisible()
++  await expect(row(page, "Secondary task")).toHaveCount(0)
++  await slot.click()
++  await expect(row(page, "Secondary task")).toBeVisible()
++  await expect(row(page, "Primary task")).toHaveCount(0)
++  await slot.locator("..").getByRole("button", { name: "New session", exact: true }).click()
++  await expect(newSessionLocation(page)).toContainText("slot-1")
++  await expect
++    .poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("opencode.window.browser.dat:tabs") ?? "[]")))
++    .toContainEqual(expect.objectContaining({ type: "draft", directory: secondary }))
++  await page.locator('[data-component="composer-editor"]').fill("Work in the secondary checkout")
++  await page.locator('[data-action="composer-submit"]').click()
++  await expect.poll(() => created).toEqual([JSON.stringify({ directory: secondary })])
++  await page.getByRole("button", { name: "Home", exact: true }).click()
++  await page.getByRole("button", { name: "Settings", exact: true }).click()
++  const settings = page.getByTestId("settings-screen")
++  await settings.getByRole("tab", { name: "Projects", exact: true }).click()
++  const card = settings.getByRole("listitem").filter({ hasText: "slot-1" })
++  await card.getByRole("button", { name: "More options", exact: true }).click()
++  await page.getByRole("menuitem", { name: "Rename", exact: true }).click()
++  const name = settings.getByRole("textbox", { name: "Rename", exact: true })
++  await name.fill("API checkout")
++  await name.press("Enter")
++  await expect(settings.getByRole("button", { name: "API checkout", exact: true })).toBeVisible()
++  await page.getByRole("button", { name: "Home", exact: true }).click()
++  await page.reload()
++  await expect(labels).toHaveText(["Main checkout", "API checkout"])
++  await projects
++    .filter({ hasText: "API checkout" })
++    .locator("..")
++    .getByRole("button", { name: "More options", exact: true })
++    .click()
++  await page.getByRole("menuitem", { name: "Close", exact: true }).click()
++  await expect(labels).toHaveText(["Main checkout"])
++  await page.reload()
++  await expect(labels).toHaveText(["Main checkout"])
++})
++
+ test("selecting a Home project lists its worktrees once, however often the project updates", async ({ page }) => {
+   const listed = [entry("alpha", 2), entry("beta", 1)]
+   const view = await homeProjects(page, listed)
+diff --git a/packages/app/e2e/utils/mock-server.ts b/packages/app/e2e/utils/mock-server.ts
+index d87f100..d4b887e 100644
+--- a/packages/app/e2e/utils/mock-server.ts
++++ b/packages/app/e2e/utils/mock-server.ts
+@@ -78,6 +78,8 @@ export interface MockServerConfig {
+   // Runs on GET /api/location for a named directory before it answers, as the server registers the project of a
+   // directory it resolves.
+   onLocationGet?: (directory: string) => void
++  // Additional clones share repository identity but resolve to their own checkout root.
++  checkouts?: { directory: string; projectID: string; canonical: string }[]
+   sessions: MockSession[]
+   pageMessages: (
+     sessionId: string,
+@@ -1465,6 +1467,14 @@ function mockHandlers(
+ 
+ // The requested workspace (directory) inside its listed project, else inside the configured project.
+ function location(config: MockServerConfig, directory = config.directory) {
++  const checkout = config.checkouts?.find(
++    (item) => directory === item.directory || directory.startsWith(`${item.directory}/`),
++  )
++  if (checkout)
++    return {
++      directory,
++      project: { id: checkout.projectID, directory: checkout.directory, canonical: checkout.canonical },
++    }
+   const listed = (config.projects ? resolve(config.projects) : [])
+     .flatMap((item) => Option.toArray(decodeProject(item)))
+     .find((item) =>
+diff --git a/packages/app/src/new-session/project/controller.ts b/packages/app/src/new-session/project/controller.ts
+index 3678f99..5cd16c4 100644
+--- a/packages/app/src/new-session/project/controller.ts
++++ b/packages/app/src/new-session/project/controller.ts
+@@ -9,6 +9,7 @@ import { useWorkspaceLocation } from "@/workspaces/location"
+ import { workspaceSelectionDestination } from "@/workspaces/paths"
+ import { useTabs } from "@/shell/tabs/tabs"
+ import type { PromptProjectControls, PromptServer } from "./selector"
++import { pathKey } from "@/workspaces/path-key"
+ 
+ export function createComposerProjectControls(props: { draftId: string; worktree: () => string }) {
+   const servers = useServers()
+@@ -23,13 +24,13 @@ export function createComposerProjectControls(props: { draftId: string; worktree
+   // Every server project, one per directory, marked as used by this client or not; the selector orders them.
+   const listed = (ctx: ServerCtx, server?: PromptServer) => {
+     const used = ctx.projects.used()
+-    const ids = new Set(used.map((project) => project.id))
++    const directories = new Set(used.map((project) => pathKey(project.worktree)))
+ 
+     return [
+       ...used.map((project) => ({ ...project, used: true, server })),
+       ...ctx.projects
+         .unique()
+-        .filter((project) => !ids.has(project.id))
++        .filter((project) => !directories.has(pathKey(project.worktree)))
+         .map((project) => ({ ...project, used: false, server })),
+     ]
+   }
+@@ -48,8 +49,7 @@ export function createComposerProjectControls(props: { draftId: string; worktree
+   const ready = createMemo(() =>
+     servers.list.filter(
+       (connection) =>
+-        !!ServerConnection.http(connection) &&
+-        !isServerFailed(global.servers.health[ServerConnection.key(connection)]),
++        !!ServerConnection.http(connection) && !isServerFailed(global.servers.health[ServerConnection.key(connection)]),
+     ),
+   )
+ 
+@@ -93,8 +93,12 @@ export function createComposerProjectControls(props: { draftId: string; worktree
+         const directory = Array.isArray(result) ? result[0] : result
+ 
+         if (!directory) return
+-        void global.serverCtx(ServerConnection.key(connection))?.projects.add(directory)
+-        selectProject(directory, serverKey)
++        void global
++          .serverCtx(ServerConnection.key(connection))
++          ?.projects.add(directory)
++          .then((project) => {
++            if (project) selectProject(project.worktree, serverKey)
++          })
+       },
+     })
+   }
+diff --git a/packages/app/src/new-session/workspace/controller.ts b/packages/app/src/new-session/workspace/controller.ts
+index 77ff4ec..18f212f 100644
+--- a/packages/app/src/new-session/workspace/controller.ts
++++ b/packages/app/src/new-session/workspace/controller.ts
+@@ -2,7 +2,7 @@ import { createEffect, createMemo, createResource, onCleanup } from "solid-js"
+ import { createStore } from "solid-js/store"
+ import { useWorkspaceLocation } from "@/workspaces/location"
+ import { useServerSDK } from "@/runtime/server/client"
+-import { useData } from "@/runtime/server/current"
++import { useData, useServer } from "@/runtime/server/current"
+ import { useSettings } from "@/settings/model"
+ import { useTabs } from "@/shell/tabs/tabs"
+ import { ServerConnection } from "@/runtime/server/registry"
+@@ -57,12 +57,16 @@ export function createNewSessionWorkspaceController(input: {
+   const sdk = useWorkspaceLocation()
+   const serverSDK = useServerSDK()
+   const data = useData()
++  const server = useServer()
+   const settings = useSettings()
+   const tabs = useTabs()
+ 
+   const [state, setState] = createStore<{ existing?: { projectID: string; directory: string } }>({})
+ 
+   const currentProject = createMemo(() => {
++    const checkout = server.ctx.projects.forDirectory(sdk().directory)
++
++    if (checkout) return checkout
+     const projectID = data.location.info({ directory: sdk().directory })?.project.id
+     const current = projectID ? data.project.get(projectID) : undefined
+ 
+@@ -167,11 +171,11 @@ export function createNewSessionWorkspaceController(input: {
+     }),
+   )
+ 
+-  // A draft opened from a worktree session keeps that worktree as its directory; Local still runs in the main checkout.
++  // Local means this manually selected checkout, not the repository's canonical clone.
+   const projectRoot = createMemo(
+     () =>
+-      data.location.info({ directory: sdk().directory })?.project.canonical ??
+       currentProject()?.worktree ??
++      data.location.info({ directory: sdk().directory })?.project.canonical ??
+       sdk().directory,
+   )
+ 
+diff --git a/packages/app/src/runtime/server/checkouts.ts b/packages/app/src/runtime/server/checkouts.ts
+new file mode 100644
+index 0000000..9a79ce9
+--- /dev/null
++++ b/packages/app/src/runtime/server/checkouts.ts
+@@ -0,0 +1,47 @@
++import { containsDirectory } from "@opencode/util/path"
++import { pathKey } from "@/workspaces/path-key"
++import type { Project } from "./types"
++
++export type Checkout = { projectID: string; directory: string; name?: string }
++
++export function checkoutProjects(projects: readonly Project[], checkouts: readonly Checkout[]): Project[] {
++  return checkouts
++    .flatMap((checkout) => {
++      const key = pathKey(checkout.directory)
++
++      const project =
++        projects.find((item) => pathKey(item.worktree) === key || item.sandboxes.includes(checkout.directory)) ??
++        projects.find((item) => item.id === checkout.projectID)
++
++      if (!project) return []
++
++      const canonical = pathKey(project.worktree) === key
++      const sandboxes = canonical
++        ? project.sandboxes.filter(
++            (directory) => !checkouts.some((item) => pathKey(item.directory) === pathKey(directory)),
++          )
++        : []
++
++      return [
++        {
++          ...project,
++          worktree: checkout.directory,
++          name: checkout.name ?? (canonical ? project.name : undefined),
++          sandboxes,
++          worktrees: project.worktrees.filter(
++            (item) => pathKey(item.directory) === key || sandboxes.includes(item.directory),
++          ),
++        },
++      ]
++    })
++    .toSorted((a, b) => b.time.active - a.time.active)
++}
++
++export function checkoutForDirectory(projects: readonly Project[], directory: string) {
++  return (
++    projects
++      .filter((project) => containsDirectory(project.worktree, directory))
++      .toSorted((a, b) => b.worktree.length - a.worktree.length)[0] ??
++    projects.find((project) => project.sandboxes.some((sandbox) => containsDirectory(sandbox, directory)))
++  )
++}
+diff --git a/packages/app/src/runtime/server/persistence.test.ts b/packages/app/src/runtime/server/persistence.test.ts
+index 10ed3af..20aca44 100644
+--- a/packages/app/src/runtime/server/persistence.test.ts
++++ b/packages/app/src/runtime/server/persistence.test.ts
+@@ -3,7 +3,16 @@ import { Schema } from "effect"
+ import { ModelState, ServerState } from "./persistence"
+ import { Persistence } from "@/runtime/persistence/schema"
+ 
+-const initial = { list: [], hidden: {}, lastProjectID: {}, usedProjectIDs: {}, hostnames: {}, projects: {} }
++const initial = {
++  list: [],
++  hidden: {},
++  lastProjectID: {},
++  usedProjectIDs: {},
++  checkouts: {},
++  lastCheckout: {},
++  hostnames: {},
++  projects: {},
++}
+ 
+ function serverSchema() {
+   return Persistence.withInitial(ServerState, initial)
+@@ -47,6 +56,8 @@ describe("server persistence schema", () => {
+       hidden: {},
+       lastProjectID: { local: "project" },
+       usedProjectIDs: {},
++      checkouts: {},
++      lastCheckout: {},
+       hostnames: {},
+       projects: { local: [{ worktree: "/project" }] },
+     })
+diff --git a/packages/app/src/runtime/server/persistence.ts b/packages/app/src/runtime/server/persistence.ts
+index ec87717..b1bdd02 100644
+--- a/packages/app/src/runtime/server/persistence.ts
++++ b/packages/app/src/runtime/server/persistence.ts
+@@ -29,10 +29,8 @@ const StoredServer = Schema.Union([ServerHttp, ServerHttpBase, Schema.String]).p
+   }),
+ )
+ 
+-// Project data comes from the server; per server scope, the client keeps only which projects it has used.
+-// `projects` is the directory list older builds kept: each scope's entry is migrated to project IDs once the
+-// server's list loads, then deleted. Stored `recentlyClosed` and directory-keyed `lastProject` fields are not part
+-// of this schema, so decoding drops them.
++// Repository identity comes from the server; manually opened checkout directories and labels are client-local.
++// Existing project-ID preferences and legacy `projects` directories migrate once each server's list loads.
+ export const ServerState = Persistence.struct({
+   list: Persistence.array(StoredServer),
+   hidden: Schema.Record(
+@@ -44,6 +42,16 @@ export const ServerState = Persistence.struct({
+     Schema.mutableKey(Schema.String.pipe(Schema.catchDecoding(() => Effect.succeed(Option.none())))),
+   ),
+   usedProjectIDs: Persistence.record(Persistence.array(Schema.String)),
++  checkouts: Persistence.record(
++    Persistence.array(
++      Persistence.struct({
++        projectID: Schema.String,
++        directory: Schema.String,
++        name: Schema.optional(Schema.String),
++      }),
++    ),
++  ),
++  lastCheckout: Persistence.record(Schema.String),
+   // The last hostname each server reported, so its name shows before the first health check answers.
+   hostnames: Schema.Record(
+     Schema.String,
+diff --git a/packages/app/src/runtime/server/registry.test.ts b/packages/app/src/runtime/server/registry.test.ts
+index 03ed725..62508f9 100644
+--- a/packages/app/src/runtime/server/registry.test.ts
++++ b/packages/app/src/runtime/server/registry.test.ts
+@@ -19,6 +19,8 @@ function serverSchema() {
+     hidden: {},
+     lastProjectID: {},
+     usedProjectIDs: {},
++    checkouts: {},
++    lastCheckout: {},
+     hostnames: {},
+     projects: {},
+   })
+@@ -150,3 +152,31 @@ test("used and last projects follow dynamic server scopes, and migration consume
+   expect(store.lastProjectID).toEqual({ local: "a", [props.server]: "remote-project" })
+   expect(store.usedProjectIDs).toEqual({ local: ["a"], [props.server]: ["remote-project"] })
+ })
++
++test("checkout entries with the same project ID keep independent names, last selection, and visibility across reloads", () => {
++  const decode = Schema.decodeUnknownSync(serverSchema())
++  const [store, setStore] = createStore(decode({}))
++  const projects = createServerProjects({ store, setStore, scope: () => ServerScope.local })
++  projects.migrateCheckouts([{ projectID: "repo", directory: "/primary" }])
++  projects.touch("repo", "/slot-1")
++  projects.touch("repo", "/slot-2")
++  projects.rename("/slot-1", "API work")
++  projects.touch("repo", "/slot-1/")
++  expect(projects.checkouts()).toEqual([
++    { projectID: "repo", directory: "/primary" },
++    { projectID: "repo", directory: "/slot-1", name: "API work" },
++    { projectID: "repo", directory: "/slot-2" },
++  ])
++  expect(projects.lastCheckout()).toBe("/slot-1/")
++  projects.migrateCheckouts([{ projectID: "repo", directory: "/should-not-replace" }])
++  const [restored, save] = createStore(decode(Schema.encodeSync(serverSchema())(store)))
++  const reopened = createServerProjects({ store: restored, setStore: save, scope: () => ServerScope.local })
++  reopened.hideCheckout("/slot-1")
++  expect(reopened.checkouts()?.map((entry) => entry.directory)).toEqual(["/primary", "/slot-2"])
++  expect(reopened.lastCheckout()).toBe("/slot-2")
++  expect(reopened.used()).toEqual(["repo"])
++  reopened.hideCheckout("/primary")
++  reopened.hideCheckout("/slot-2")
++  expect(reopened.checkouts()).toEqual([])
++  expect(reopened.used()).toEqual([])
++})
+diff --git a/packages/app/src/runtime/server/registry.tsx b/packages/app/src/runtime/server/registry.tsx
+index 4efb107..1acf34a 100644
+--- a/packages/app/src/runtime/server/registry.tsx
++++ b/packages/app/src/runtime/server/registry.tsx
+@@ -4,6 +4,7 @@ import { batch, createMemo } from "solid-js"
+ import { reconcile, type SetStoreFunction, type Store } from "solid-js/store"
+ import { Persist, persisted } from "@/runtime/persistence/storage"
+ import { ServerScope } from "@/runtime/server/scope"
++import { pathKey } from "@/workspaces/path-key"
+ import type { PluginServerStatus } from "./plugin-machine"
+ import { ServerHttp, ServerHttpBase, ServerKey, ServerState } from "./persistence"
+ 
+@@ -47,7 +48,7 @@ function loopbackOrigin(url: string) {
+   return `${parsed.protocol}//127.0.0.1:${parsed.port || (parsed.protocol === "https:" ? "443" : "80")}`
+ }
+ 
+-// Project data comes from the server; this keeps which projects this client has used and the last one.
++// Repository data comes from the server; this keeps the client's manually opened checkout entries.
+ export function createServerProjects(input: {
+   scope: () => ServerScope
+   store: Store<StoredState>
+@@ -63,13 +64,58 @@ export function createServerProjects(input: {
+   }
+ 
+   return {
++    checkouts: () => input.store.checkouts[input.scope()],
++    lastCheckout: () => input.store.lastCheckout[input.scope()],
++    migrateCheckouts(entries: { projectID: string; directory: string }[]) {
++      if (input.store.checkouts[input.scope()] !== undefined) return
++      input.setStore("checkouts", input.scope(), entries)
++    },
++    rename(directory: string, name: string) {
++      const entries = input.store.checkouts[input.scope()] ?? []
++      if (!entries.some((entry) => pathKey(entry.directory) === pathKey(directory))) return false
++
++      input.setStore(
++        "checkouts",
++        input.scope(),
++        entries.map((entry) => (pathKey(entry.directory) === pathKey(directory) ? { ...entry, name } : entry)),
++      )
++      return true
++    },
++    hideCheckout(directory: string) {
++      const entries = input.store.checkouts[input.scope()] ?? []
++      const next = entries.filter((entry) => pathKey(entry.directory) !== pathKey(directory))
++
++      batch(() => {
++        input.setStore("checkouts", input.scope(), next)
++        input.setStore(
++          "usedProjectIDs",
++          input.scope(),
++          used().filter((id) => next.some((entry) => entry.projectID === id)),
++        )
++        if (pathKey(input.store.lastCheckout[input.scope()] ?? "") === pathKey(directory))
++          input.setStore("lastCheckout", input.scope(), next.at(-1)?.directory ?? "")
++      })
++    },
+     last() {
+       return input.store.lastProjectID[input.scope()]
+     },
+-    touch(projectID: string) {
++    touch(projectID: string, directory?: string) {
+       batch(() => {
+         input.setStore("lastProjectID", input.scope(), projectID)
+         use([projectID])
++
++        if (!directory) return
++        const entries = input.store.checkouts[input.scope()] ?? []
++        const index = entries.findIndex((entry) => pathKey(entry.directory) === pathKey(directory))
++
++        input.setStore(
++          "checkouts",
++          input.scope(),
++          index === -1
++            ? [...entries, { projectID, directory }]
++            : entries.map((entry, i) => (i === index ? { ...entry, projectID } : entry)),
++        )
++        input.setStore("lastCheckout", input.scope(), directory)
+       })
+     },
+     used,
+@@ -238,7 +284,16 @@ export const { use: useServers, provider: ServersProvider } = createSimpleContex
+         previousKey: "server.v3",
+       },
+       ServerState,
+-      { list: [], hidden: {}, lastProjectID: {}, usedProjectIDs: {}, hostnames: {}, projects: {} },
++      {
++        list: [],
++        hidden: {},
++        lastProjectID: {},
++        usedProjectIDs: {},
++        checkouts: {},
++        lastCheckout: {},
++        hostnames: {},
++        projects: {},
++      },
+     )
+ 
+     const language = useLanguage()
+diff --git a/packages/app/src/runtime/server/runtime.tsx b/packages/app/src/runtime/server/runtime.tsx
+index dfccc14..119a8c8 100644
+--- a/packages/app/src/runtime/server/runtime.tsx
++++ b/packages/app/src/runtime/server/runtime.tsx
+@@ -46,6 +46,7 @@ import type { SessionInfo } from "@opencode/client/promise"
+ import { projectForSession } from "@/shell/layout/helpers"
+ import { isProjectDirectory } from "@/workspaces/paths"
+ import type { Project } from "@/runtime/server/types"
++import { checkoutForDirectory, checkoutProjects } from "./checkouts"
+ 
+ export const { use: useGlobal, provider: GlobalProvider } = createSimpleContext({
+   name: "Global",
+@@ -203,6 +204,7 @@ function createServerController(
+   const settings = useSettings()
+   const tabs = useTabs()
+   const currentRoute = useCurrentRoute()
++  const hydrated = useServers().hydrated
+   const connKey = ServerConnection.key(conn)
+   const sdk = createServerSdkContext(conn, scope)
+ 
+@@ -285,6 +287,9 @@ function createServerController(
+ 
+   // The projects this client has used, in server order. Using any ID of a path shows that path's current project.
+   const used = createMemo(() => {
++    const checkouts = projects.checkouts()
++
++    if (checkouts !== undefined) return checkoutProjects(unique(), checkouts)
+     const ids = new Set(projects.used())
+     const paths = new Set(list().flatMap((project) => (ids.has(project.id) ? [pathKey(project.worktree)] : [])))
+ 
+@@ -292,6 +297,9 @@ function createServerController(
+   })
+ 
+   const forDirectory = (directory: string): Project | undefined => {
++    const checkout = checkoutForDirectory(used(), directory)
++
++    if (checkout) return checkout
+     const key = pathKey(directory)
+ 
+     return (
+@@ -304,12 +312,23 @@ function createServerController(
+     )
+   }
+ 
+-  // Older builds kept opened directories locally; once the server's list loads they become used project IDs.
++  // Migrate existing preferences once, retaining the server's shared repository IDs.
+   createEffect(() => {
+     const legacy = projects.legacy()
+ 
+-    if (!legacy || !sync.project.ready()) return
+-    untrack(() => projects.migrate(legacy.flatMap((directory) => forDirectory(directory)?.id ?? [])))
++    if (!hydrated() || !sync.project.ready()) return
++    untrack(() => {
++      const entries = legacy
++        ? legacy.flatMap((directory) => {
++            const project = forDirectory(directory)
++
++            return project ? [{ projectID: project.id, directory: project.worktree }] : []
++          })
++        : used().map((project) => ({ projectID: project.id, directory: project.worktree }))
++      projects.migrateCheckouts(entries)
++
++      if (legacy) projects.migrate(entries.map((entry) => entry.projectID))
++    })
+   })
+ 
+   // Resolving a directory registers its project on the server; the list then reloads to include it, and the
+@@ -319,9 +338,10 @@ function createServerController(
+       .get({ location: { directory } })
+       .then(async (location) => {
+         await sync.project.refresh()
+-        projects.touch(location.project.id)
++        projects.migrateCheckouts(used().map((project) => ({ projectID: project.id, directory: project.worktree })))
++        projects.touch(location.project.id, location.project.directory)
+ 
+-        return list().find((project) => project.id === location.project.id)
++        return used().find((project) => pathKey(project.worktree) === pathKey(location.project.directory))
+       })
+       .catch((error) => {
+         showToast({
+@@ -347,18 +367,27 @@ function createServerController(
+       used,
+       add,
+       forDirectory,
+-      forSession: (session: SessionInfo): Project | undefined => projectForSession(session, list()),
+-      last: () => list().find((project) => project.id === projects.last()),
++      forSession: (session: SessionInfo): Project | undefined =>
++        projectForSession(session, used()) ?? projectForSession(session, list()),
++      last: () =>
++        used().find((project) => pathKey(project.worktree) === pathKey(projects.lastCheckout() ?? "")) ??
++        used().find((project) => project.id === projects.last()),
++      rename(directory: string, name: string) {
++        if (list().some((project) => pathKey(project.worktree) === pathKey(directory))) return false
++
++        return projects.rename(directory, name)
++      },
+       // Marks the project of a directory as used from this client, and as the last one.
+       touch(directory: string) {
+-        const id = forDirectory(directory)?.id
++        const project = forDirectory(directory)
+ 
+-        if (id) projects.touch(id)
++        if (!project) return
++        projects.migrateCheckouts(used().map((item) => ({ projectID: item.id, directory: item.worktree })))
++        projects.touch(project.id, project.worktree)
+       },
+       // Removes a project from this client's used projects until it is used again; the server keeps it.
+       hide(project: Pick<Project, "worktree">) {
+-        const key = pathKey(project.worktree)
+-        projects.hide(list().flatMap((item) => (pathKey(item.worktree) === key ? [item.id] : [])))
++        projects.hideCheckout(project.worktree)
+       },
+     },
+     notification,
+diff --git a/packages/app/src/settings/shell.tsx b/packages/app/src/settings/shell.tsx
+index fb0af1c..e4f0883 100644
+--- a/packages/app/src/settings/shell.tsx
++++ b/packages/app/src/settings/shell.tsx
+@@ -103,10 +103,7 @@ export function SettingsScreen() {
+   const connection = (key: string) => servers().find((item) => item.key === key)
+ 
+   const project = (server: ServerConnection.Any, directory: string) =>
+-    global
+-      .serverCtx(ServerConnection.key(server))
+-      ?.projects.list()
+-      .find((item) => item.worktree === directory)
++    global.serverCtx(ServerConnection.key(server))?.projects.forDirectory(directory)
+ 
+   const targetServer = createMemo(() => {
+     const view = surface.view()
+diff --git a/packages/app/src/settings/workspaces/project-model.ts b/packages/app/src/settings/workspaces/project-model.ts
+index e7359fc..6e88c29 100644
+--- a/packages/app/src/settings/workspaces/project-model.ts
++++ b/packages/app/src/settings/workspaces/project-model.ts
+@@ -61,15 +61,21 @@ export function createEditProjectModel(props: { project: LocalProject; server: S
+   }
+ 
+   const request = (target: ProjectTarget, patch: ProjectPatch, signal: AbortSignal): Promise<void> => {
++    const local = patch.name !== undefined && serverCtx.projects.rename(target.worktree, patch.name)
++    const shared = { ...patch, name: local ? undefined : patch.name }
++
++    if (shared.name === undefined && shared.icon === undefined && shared.commands === undefined)
++      return Promise.resolve()
++
+     if (target.id && target.id !== "global") {
+       const projectID = target.id
+ 
+-      return serverCtx.sdk.api.project.update({ projectID, ...patch }, { signal }).then((project) => {
++      return serverCtx.sdk.api.project.update({ projectID, ...shared }, { signal }).then((project) => {
+         serverCtx.sync.project.update(project)
+       })
+     }
+ 
+-    return Promise.try(() => serverCtx.sync.project.meta(target.worktree, patch))
++    return Promise.try(() => serverCtx.sync.project.meta(target.worktree, shared))
+   }
+ 
+   const run = (effect: ProjectSettingsEffect) => {
+diff --git a/packages/app/src/settings/workspaces/project-row.tsx b/packages/app/src/settings/workspaces/project-row.tsx
+index f644740..d36b08e 100644
+--- a/packages/app/src/settings/workspaces/project-row.tsx
++++ b/packages/app/src/settings/workspaces/project-row.tsx
+@@ -38,6 +38,8 @@ export function SettingsProjectRow(props: {
+     onSave: async (name) => {
+       const value = name === getFilename(props.project.worktree) ? "" : name
+ 
++      if (context.projects.rename(props.project.worktree, value)) return true
++
+       return (
+         props.project.id && props.project.id !== "global"
+           ? context.sdk.api.project
+diff --git a/packages/app/src/settings/workspaces/projects.tsx b/packages/app/src/settings/workspaces/projects.tsx
+index 4356d2c..307f0d7 100644
+--- a/packages/app/src/settings/workspaces/projects.tsx
++++ b/packages/app/src/settings/workspaces/projects.tsx
+@@ -11,6 +11,7 @@ import { homeProjectDirectories } from "@/shell/layout/helpers"
+ import type { LocalProject } from "@/shell/state/layout"
+ import { useDirectoryPicker } from "@/workspaces/selection/picker"
+ import { addProjects } from "@/home/projects/add"
++import { pathKey } from "@/workspaces/path-key"
+ import { SettingsSearchEmpty } from "../search-empty"
+ import { SettingsSearchField } from "../search-field"
+ import { SettingsProjectRow } from "./project-row"
+@@ -32,10 +33,14 @@ export const SettingsProjects: Component<{
+ 
+   let focus: string | undefined
+ 
+-  const projects = createMemo(() => context.projects.unique())
+-  const used = createMemo(() => new Set(context.projects.used().map((project) => project.id)))
++  const used = createMemo(() => new Set(context.projects.used().map((project) => pathKey(project.worktree))))
+ 
+-  const others = createMemo(() => projects().filter((project) => !used().has(project.id)))
++  const projects = createMemo(() => [
++    ...context.projects.used(),
++    ...context.projects.unique().filter((project) => !used().has(pathKey(project.worktree))),
++  ])
++
++  const others = createMemo(() => projects().filter((project) => !used().has(pathKey(project.worktree))))
+   const searchable = createMemo(() => projects().length > 7 || others().length > 0)
+   const query = createMemo(() => (searchable() ? store.filter.trim().toLowerCase() : ""))
+ 
+@@ -46,8 +51,8 @@ export const SettingsProjects: Component<{
+     ),
+   )
+ 
+-  const added = createMemo(() => filtered().filter((project) => used().has(project.id)))
+-  const otherResults = createMemo(() => filtered().filter((project) => !used().has(project.id)))
++  const added = createMemo(() => filtered().filter((project) => used().has(pathKey(project.worktree))))
++  const otherResults = createMemo(() => filtered().filter((project) => !used().has(pathKey(project.worktree))))
+ 
+   createEffect(() => {
+     if (!searchable()) setStore("filter", "")
+diff --git a/packages/app/src/shell/titlebar/sidebar-organized.tsx b/packages/app/src/shell/titlebar/sidebar-organized.tsx
+index 2a60bbc..23806b4 100644
+--- a/packages/app/src/shell/titlebar/sidebar-organized.tsx
++++ b/packages/app/src/shell/titlebar/sidebar-organized.tsx
+@@ -208,8 +208,8 @@ function ProjectList(props: {
+     const order = props.state.order[server() ?? ""] ?? []
+ 
+     return [
+-      ...order.flatMap((id) => list.find((project) => project.id === id) ?? []),
+-      ...list.filter((project) => !order.includes(project.id)),
++      ...order.flatMap((id) => list.filter((project) => pathKey(project.worktree) === id || project.id === id)),
++      ...list.filter((project) => !order.includes(pathKey(project.worktree)) && !order.includes(project.id)),
+     ]
+   })
+ 
+@@ -220,7 +220,7 @@ function ProjectList(props: {
+     const key = server()
+ 
+     if (!props.ready || !servers.hydrated() || !key || !ctx()?.sync.project.ready()) return
+-    const ids = projects().map((project) => project.id)
++    const ids = projects().map((project) => pathKey(project.worktree))
+ 
+     const saved = props.state.order[key] ?? []
+ 
+@@ -278,16 +278,16 @@ function ProjectList(props: {
+               props.onReorder(
+                 ServerConnection.key(conn()),
+                 arrayMove(
+-                  projects().map((project) => project.id),
++                  projects().map((project) => pathKey(project.worktree)),
+                   source.initialIndex,
+                   source.index,
+                 ),
+               )
+             }}
+           >
+-            <Key each={visible()} by={(project) => `${ServerConnection.key(conn())}:${project.id}`}>
++            <Key each={visible()} by={(project) => `${ServerConnection.key(conn())}:${pathKey(project.worktree)}`}>
+               {(project, index) => {
+-                const key = () => `${server()}:${project().id}`
++                const key = () => `${server()}:${pathKey(project().worktree)}`
+ 
+                 const projectSessions = () => grouped().get(pathKey(project().worktree)) ?? []
+ 
+-- 
+2.43.0
+
