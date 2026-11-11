@@ -7,6 +7,7 @@ A GUI-only patch for OpenCode **2.2.6 and 2.2.7**: manually add permanent clones
 - New sessions run in the selected checkout, not the canonical clone.
 - Secondary checkouts can have independent client-local names.
 - Checkout-local icon colors and uploaded images, including the primary checkout when sibling entries exist.
+- Organized sidebar groups all visible servers, with their projects and sessions underneath. Switching sessions does not hide the other server's projects.
 - No automatic cloning, worktree allocation, recycling, branch switching, or backend identity changes.
 
 This is a small patch distribution repository, not a fork of the entire upstream source tree. The upstream project is [anomalyco/opencode](https://github.com/anomalyco/opencode).
@@ -44,6 +45,12 @@ For a native Electron build, follow upstream's `packages/desktop/README.md`. Thi
 See `CHECKOUT_ENTRIES.md` inside the applied patch for behavior, limitations, and verification commands.
 
 ## Verification
+
+Multi-server sidebar follow-up on **2.2.7**:
+
+- Each visible server keeps its own project order, expansion state, and session list.
+- Regression covers identical project names, repository IDs, paths, and session IDs on two servers, correct session routing, and expansion persistence across reload.
+- Production-build regression passed three concurrent repetitions without retries. App typecheck and focused lint passed; the four checkout/icon regressions still pass.
 
 Icon-isolation follow-up on **2.2.7**:
 

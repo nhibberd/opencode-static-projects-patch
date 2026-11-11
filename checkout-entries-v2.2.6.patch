@@ -137,6 +137,70 @@ index 85734ab..d1f2179 100644
  test("selecting a Home project lists its worktrees once, however often the project updates", async ({ page }) => {
    const listed = [entry("alpha", 2), entry("beta", 1)]
    const view = await homeProjects(page, listed)
+diff --git a/packages/app/e2e/regression/multi-server.spec.ts b/packages/app/e2e/regression/multi-server.spec.ts
+index e42837e..0c0b9ff 100644
+--- a/packages/app/e2e/regression/multi-server.spec.ts
++++ b/packages/app/e2e/regression/multi-server.spec.ts
+@@ -122,6 +122,59 @@ const reply = (sessionID: string, permissionID: string) => ({
+   body: { decision: "once" },
+ })
+ 
++test("organized sidebar keeps both servers' projects and sessions visible", async ({ page }) => {
++  const directory = "/repo/code"
++  const projectID = "proj_shared"
++  const id = "ses_shared"
++
++  await mockServers(page, {
++    [SERVER]: {
++      directory,
++      project: project({ id: projectID, directory, name: "code" }),
++      sessions: [session({ id, directory, projectID, title: "Local work" })],
++      pageMessages: () => ({ items: [] }),
++    },
++    [REMOTE_SERVER]: {
++      directory,
++      project: project({ id: projectID, directory, name: "code" }),
++      sessions: [session({ id, directory, projectID, title: "Remote work" })],
++      pageMessages: () => ({ items: [] }),
++    },
++  })
++  await seed(page, {
++    servers: [
++      { url: SERVER, name: "Local" },
++      { url: REMOTE_SERVER, name: "Remote" },
++    ],
++    usedProjects: { local: [projectID], [REMOTE_SERVER]: [projectID] },
++    settings: { appearance: { tabLayout: "vertical" }, general: { sidebarOrganize: "projects" } },
++  })
++  await page.goto("/")
++
++  const local = page.getByRole("region", { name: "Local", exact: true })
++  const remote = page.getByRole("region", { name: "Remote", exact: true })
++
++  for (const group of [local, remote]) {
++    await expect(group.getByRole("button", { name: /\bcode$/ })).toBeVisible()
++    await group.getByRole("button", { name: /\bcode$/ }).click()
++  }
++
++  await expect(local.getByRole("button", { name: /Local work$/ })).toBeVisible()
++  await expect(remote.getByRole("button", { name: /Remote work$/ })).toBeVisible()
++  await remote.getByRole("button", { name: /Remote work$/ }).click()
++  await expectPath(page, sessionHref(id, REMOTE_SERVER))
++  await expectSessionTitle(page, "Remote work")
++  await expect(local.getByRole("button", { name: /Local work$/ })).toBeVisible()
++  await local.getByRole("button", { name: /Local work$/ }).click()
++  await expectPath(page, sessionHref(id))
++  await expectSessionTitle(page, "Local work")
++  await expect(remote.getByRole("button", { name: /Remote work$/ })).toBeVisible()
++
++  await page.reload()
++  await expect(local.getByRole("button", { name: /Local work$/ })).toBeVisible()
++  await expect(remote.getByRole("button", { name: /Remote work$/ })).toBeVisible()
++})
++
+ test("settings opened from a remote session sweep every server and keep the remote scope", async ({ page }) => {
+   // Server A has no tab and is never visited: its pending request proves one toggle sweeps every connected server.
+   const view = await setup(page, { tabs: [], a: { permissions: [pending("permission-pending-a", sessionA.id)] } })
 diff --git a/packages/app/e2e/utils/mock-server.ts b/packages/app/e2e/utils/mock-server.ts
 index 8ed3d5e..fbcc6fc 100644
 --- a/packages/app/e2e/utils/mock-server.ts
@@ -725,10 +789,99 @@ index 4356d2c..307f0d7 100644
    createEffect(() => {
      if (!searchable()) setStore("filter", "")
 diff --git a/packages/app/src/shell/titlebar/sidebar-organized.tsx b/packages/app/src/shell/titlebar/sidebar-organized.tsx
-index 2a60bbc..23806b4 100644
+index 2a60bbc..4e9e08b 100644
 --- a/packages/app/src/shell/titlebar/sidebar-organized.tsx
 +++ b/packages/app/src/shell/titlebar/sidebar-organized.tsx
-@@ -208,8 +208,8 @@ function ProjectList(props: {
+@@ -25,7 +25,6 @@ import { ServerConnection, useServers } from "@/runtime/server/registry"
+ import { useGlobal, useServerCtx } from "@/runtime/server/runtime"
+ import type { Project } from "@/runtime/server/types"
+ import { ProjectIcon } from "@/shell/layout/project-icon"
+-import { useLayout } from "@/shell/state/layout"
+ import { createProjectSessionActions } from "@/shell/tabs/project-sessions"
+ import { useTabs, type Tab } from "@/shell/tabs/tabs"
+ import { pathKey } from "@/workspaces/path-key"
+@@ -45,6 +44,8 @@ export function SidebarOrganized(props: {
+ }) {
+   const language = useLanguage()
+ 
++  const servers = useServers()
++
+   const tabs = useTabs()
+ 
+   const global = useGlobal()
+@@ -134,17 +135,29 @@ export function SidebarOrganized(props: {
+             </button>
+             <Show when={!state.projectsCollapsed}>
+               <div class="flex min-w-0 flex-col gap-1">
+-                <ProjectList
+-                  currentTab={props.currentTab}
+-                  lastActivity={activity.get}
+-                  isOpenTab={isOpenTab}
+-                  highlightActive={projectSelected()}
+-                  onSelect={(session) => setLocal("projectSession", session)}
+-                  state={state}
+-                  ready={ready()}
+-                  onExpand={(key) => setState("expanded", key, (value) => !value)}
+-                  onReorder={(server, ids) => setState("order", server, ids)}
+-                />
++                <Key each={servers.visible} by={ServerConnection.key}>
++                  {(connection) => (
++                    <section aria-label={servers.label(connection())} class="flex min-w-0 flex-col gap-1">
++                      <h3 class="truncate px-2 py-1 text-12-regular text-v2-text-text-faint">
++                        {servers.label(connection())}
++                      </h3>
++                      <div class="ms-2 flex min-w-0 flex-col gap-1">
++                        <ProjectList
++                          connection={connection()}
++                          currentTab={props.currentTab}
++                          lastActivity={activity.get}
++                          isOpenTab={isOpenTab}
++                          highlightActive={projectSelected()}
++                          onSelect={(session) => setLocal("projectSession", session)}
++                          state={state}
++                          ready={ready()}
++                          onExpand={(key) => setState("expanded", key, (value) => !value)}
++                          onReorder={(server, ids) => setState("order", server, ids)}
++                        />
++                      </div>
++                    </section>
++                  )}
++                </Key>
+               </div>
+             </Show>
+           </section>
+@@ -162,6 +175,7 @@ export function SidebarOrganized(props: {
+ }
+ 
+ function ProjectList(props: {
++  connection: ServerConnection.Any
+   currentTab: Tab | undefined
+   lastActivity: (server: ServerConnection.Key, sessionId: string) => number | undefined
+   isOpenTab: (server: ServerConnection.Key, sessionId: string) => boolean
+@@ -176,8 +190,6 @@ function ProjectList(props: {
+ 
+   const servers = useServers()
+ 
+-  const layout = useLayout()
+-
+   const actions = createProjectSessionActions()
+ 
+   const projectActions = createProjectActions()
+@@ -187,12 +199,7 @@ function ProjectList(props: {
+     sessionLimits: {},
+   })
+ 
+-  const connection = createMemo(
+-    () =>
+-      servers.visible.find(
+-        (conn) => ServerConnection.key(conn) === (props.currentTab?.server ?? layout.home.selection().server),
+-      ) ?? servers.visible[0],
+-  )
++  const connection = () => props.connection
+ 
+   const ctx = useServerCtx(connection)
+ 
+@@ -208,8 +215,8 @@ function ProjectList(props: {
      const order = props.state.order[server() ?? ""] ?? []
  
      return [
@@ -739,7 +892,7 @@ index 2a60bbc..23806b4 100644
      ]
    })
  
-@@ -220,7 +220,7 @@ function ProjectList(props: {
+@@ -220,7 +227,7 @@ function ProjectList(props: {
      const key = server()
  
      if (!props.ready || !servers.hydrated() || !key || !ctx()?.sync.project.ready()) return
@@ -748,7 +901,7 @@ index 2a60bbc..23806b4 100644
  
      const saved = props.state.order[key] ?? []
  
-@@ -278,16 +278,16 @@ function ProjectList(props: {
+@@ -278,16 +285,16 @@ function ProjectList(props: {
                props.onReorder(
                  ServerConnection.key(conn()),
                  arrayMove(
@@ -768,12 +921,21 @@ index 2a60bbc..23806b4 100644
  
                  const projectSessions = () => grouped().get(pathKey(project().worktree)) ?? []
  
+@@ -381,7 +388,7 @@ function ProjectRow(props: {
+ 
+   const sortable = useSortable({
+     get id() {
+-      return props.project.id
++      return pathKey(props.project.worktree)
+     },
+     get index() {
+       return props.index
 diff --git a/CHECKOUT_ENTRIES.md b/CHECKOUT_ENTRIES.md
 new file mode 100644
-index 0000000..4e3004d
+index 0000000..1fbca06
 --- /dev/null
 +++ b/CHECKOUT_ENTRIES.md
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,45 @@
 +# Separate checkout entries
 +
 +GUI-only patch for OpenCode **v2.2.6** (`dc2ffcf8bf26f9e669b6aa22b95f50e12be15e06`) and **v2.2.7** (`fedc6f208aa2bd54c1019227214568083f6380ad`).
@@ -781,6 +943,8 @@ index 0000000..4e3004d
 +Use **Add project** for each permanent clone or checkout. Directories sharing a repository ID stay separate in Home, Settings > Projects, the New Session picker, and the organized sidebar. Selecting Local in a new session targets the selected checkout, not the repository's canonical clone.
 +
 +Checkout entries survive reloads and can be closed independently. Secondary checkouts default to their folder name and can be renamed independently. Their labels are client-local. Icon colors and uploaded images are client-local for secondary checkouts and for the primary checkout when multiple entries share its repository. Local icon choices survive reloads and closing sibling entries. Single-entry primary projects retain server-backed appearance settings. The primary project's name, commands, repository identity, and session IDs remain server-backed. Other repository-level settings remain shared.
++
++The organized vertical sidebar shows every visible server as a named group, with its projects and sessions underneath. Switching tabs does not switch away from the other groups. Project ordering and expansion remain scoped by server and checkout directory; session actions use the group's server even when names, paths, project IDs, or session IDs match another server.
 +
 +This patch does not create, copy, allocate, recycle, delete, or switch any checkout. Prepare the directories and switch their branches yourself. Two entries pointing to the same directory do not provide isolation.
 +
@@ -811,6 +975,7 @@ index 0000000..4e3004d
 +# Production-build browser regression suite (from packages/app)
 +bun x playwright install chromium
 +PLAYWRIGHT_BUILD=1 bun x playwright test e2e/regression/home.spec.ts --project chromium
++PLAYWRIGHT_BUILD=1 bun x playwright test e2e/regression/multi-server.spec.ts --project chromium --grep "organized sidebar keeps"
 +```
 +
 +The clone regression adds a secondary directory through the folder picker, reloads, selects each checkout independently, submits a session and checks its exact directory, renames the secondary checkout, customizes colors and an uploaded icon independently, reloads again, and closes only that entry. Registry tests cover persisted entries with a shared project ID, independent labels, last selection, and removal. Existing tests cover older preference migration and delayed desktop storage.
